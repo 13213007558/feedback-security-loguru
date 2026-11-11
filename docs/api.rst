@@ -14,7 +14,6 @@ API Reference
 * :class:`~loguru._logger.Logger`
 
     * :meth:`~loguru._logger.Logger.add`
-
         * :ref:`sink`
         * :ref:`message`
         * :ref:`levels`
@@ -46,5 +45,7 @@ API Reference
     * :meth:`~loguru._logger.Logger.critical`
     * :meth:`~loguru._logger.Logger.log`
     * :meth:`~loguru._logger.Logger.exception`
+
+* :class:`~loguru.LoguruQueueFull`
 
 * :ref:`type-hints`

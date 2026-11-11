@@ -282,6 +282,8 @@ class Logger:
         backtrace=_defaults.LOGURU_BACKTRACE,
         diagnose=_defaults.LOGURU_DIAGNOSE,
         enqueue=_defaults.LOGURU_ENQUEUE,
+        queue_maxsize=_defaults.LOGURU_QUEUE_MAXSIZE,
+        onqueue_full=_defaults.LOGURU_ONQUEUE_FULL,
         context=_defaults.LOGURU_CONTEXT,
         catch=_defaults.LOGURU_CATCH,
         **kwargs
@@ -318,6 +320,25 @@ class Logger:
             Whether the messages to be logged should first pass through a multiprocessing-safe queue
             before reaching the sink. This is useful while logging to a file through multiple
             processes. This also has the advantage of making logging calls non-blocking.
+        queue_maxsize : |int| or ``None``, optional
+            Maximum number of log records allowed to wait in the internal queue at any time, shared
+            by every process using the handler. When ``None`` (the default), the queue is unbounded
+            and the behavior is unchanged. Otherwise, once the limit is reached new records are
+            rejected according to ``onqueue_full`` instead of accumulating indefinitely. A slot is
+            released as soon as a record has been picked up by the writer thread (that is, before
+            the sink is called), so a record that fails to be serialized or whose sink raises does
+            not keep holding a slot. This option only takes effect when ``enqueue=True``; it is
+            ignored otherwise (so environment-provided defaults do not affect non-queued handlers).
+        onqueue_full : |str| or |callable|_, optional
+            Policy applied when a record cannot be admitted into a bounded queue
+            (``queue_maxsize`` set) or when the handler is stopped. The built-in policies are
+            ``"drop"`` (the default, discard the record and report the rejection through the usual
+            ``catch`` mechanism), ``"raise"`` (raise :class:`~loguru.LoguruQueueFull`
+            directly to the caller, even when ``catch=True``) and ``"block"`` (wait until a slot is
+            available, applying backpressure). A callable is invoked with the rejected formatted
+            message (a :class:`~loguru._handler.Message`) and acts as a dead-letter sink; if it
+            returns normally no error is raised. This option only takes effect when
+            ``enqueue=True`` and ``queue_maxsize`` is set, and is ignored otherwise.
         context : |multiprocessing.Context| or |str|, optional
             A context object or name that will be used for all tasks involving internally the
             |multiprocessing| module, in particular when ``enqueue=True``. If ``None``, the default
@@ -1041,6 +1062,36 @@ class Logger:
                 "not: '%s'" % type(context).__name__
             )
 
+        if queue_maxsize is not None:
+            if isinstance(queue_maxsize, bool) or not isinstance(queue_maxsize, int):
+                raise TypeError(
+                    "Invalid queue_maxsize, it should be an integer or None, not: '%s'"
+                    % type(queue_maxsize).__name__
+                )
+            if queue_maxsize < 0:
+                raise ValueError(
+                    "Invalid queue_maxsize value, it should be a positive integer, not: %d"
+                    % queue_maxsize
+                )
+
+        valid_onqueue_full = ("drop", "raise", "block")
+        if onqueue_full not in valid_onqueue_full and not callable(onqueue_full):
+            raise TypeError(
+                "Invalid onqueue_full, it should be one of %s or a callable, not: '%s'"
+                % (", ".join(map(repr, valid_onqueue_full)), onqueue_full)
+            )
+
+        if not enqueue:
+            # These options only govern the internal queue. When enqueue is disabled
+            # they are ignored rather than rejected, so that environment-provided
+            # defaults do not break non-queued handlers (including the built-in one).
+            queue_maxsize = None
+            onqueue_full = _defaults.LOGURU_ONQUEUE_FULL
+        elif queue_maxsize is None and onqueue_full != _defaults.LOGURU_ONQUEUE_FULL:
+            raise ValueError(
+                "The 'onqueue_full' argument requires 'queue_maxsize' to be set"
+            )
+
         with self._core.lock:
             exception_formatter = ExceptionFormatter(
                 colorize=colorize,
@@ -1061,6 +1112,8 @@ class Logger:
                 colorize=colorize,
                 serialize=serialize,
                 enqueue=enqueue,
+                queue_maxsize=queue_maxsize,
+                onqueue_full=onqueue_full,
                 multiprocessing_context=context,
                 id_=handler_id,
                 error_interceptor=error_interceptor,

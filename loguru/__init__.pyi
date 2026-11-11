@@ -119,6 +119,13 @@ class Record(TypedDict):
 class Message(str):
     record: Record
 
+
+class LoguruQueueFull(Exception):
+    pass
+
+
+QueueFullPolicy = Union[str, Callable[[Message], None]]
+
 class Writable(Protocol):
     def write(self, message: Message) -> Any: ...
 
@@ -142,6 +149,8 @@ class BasicHandlerConfig(TypedDict, total=False):
     backtrace: bool
     diagnose: bool
     enqueue: bool
+    queue_maxsize: Optional[int]
+    onqueue_full: QueueFullPolicy
     catch: bool
 
 class FileHandlerConfig(TypedDict, total=False):
@@ -154,6 +163,8 @@ class FileHandlerConfig(TypedDict, total=False):
     backtrace: bool
     diagnose: bool
     enqueue: bool
+    queue_maxsize: Optional[int]
+    onqueue_full: QueueFullPolicy
     catch: bool
     rotation: Optional[
         Union[
@@ -187,6 +198,8 @@ class AsyncHandlerConfig(TypedDict, total=False):
     backtrace: bool
     diagnose: bool
     enqueue: bool
+    queue_maxsize: Optional[int]
+    onqueue_full: QueueFullPolicy
     catch: bool
     context: Optional[Union[str, BaseContext]]
     loop: Optional[AbstractEventLoop]
@@ -215,6 +228,8 @@ class Logger:
         backtrace: bool = ...,
         diagnose: bool = ...,
         enqueue: bool = ...,
+        queue_maxsize: Optional[int] = ...,
+        onqueue_full: QueueFullPolicy = ...,
         context: Optional[Union[str, BaseContext]] = ...,
         catch: bool = ...
     ) -> int: ...
@@ -231,6 +246,8 @@ class Logger:
         backtrace: bool = ...,
         diagnose: bool = ...,
         enqueue: bool = ...,
+        queue_maxsize: Optional[int] = ...,
+        onqueue_full: QueueFullPolicy = ...,
         catch: bool = ...,
         context: Optional[Union[str, BaseContext]] = ...,
         loop: Optional[AbstractEventLoop] = ...
@@ -248,6 +265,8 @@ class Logger:
         backtrace: bool = ...,
         diagnose: bool = ...,
         enqueue: bool = ...,
+        queue_maxsize: Optional[int] = ...,
+        onqueue_full: QueueFullPolicy = ...,
         context: Optional[Union[str, BaseContext]] = ...,
         catch: bool = ...,
         rotation: Optional[

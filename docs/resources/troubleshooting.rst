@@ -297,6 +297,11 @@ Alternatively, you can either:
 
 Setting ``enqueue=True`` on independently added handlers does not coordinate them.
 
+The queue used by ``enqueue=True`` is unbounded by default. If the sink cannot keep up with the
+logging rate, pending records accumulate in memory without limit. Pass ``queue_maxsize`` to cap the
+number of in-flight records and ``onqueue_full`` to choose how rejections are surfaced; see
+:ref:`recipes-bounded-queue` for the available policies and the guarantees of |complete|.
+
 
 Why am I facing errors when I use a custom formatting function?
 ---------------------------------------------------------------

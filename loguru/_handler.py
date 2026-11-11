@@ -6,8 +6,10 @@ import threading
 from contextlib import contextmanager
 from threading import Thread
 
+from ._bounded_queue import BoundedQueue, LoguruQueueFull, UnboundedQueue
 from ._colorizer import Colorizer
 from ._locks_machinery import create_handler_lock
+from . import _defaults
 
 
 def prepare_colored_format(format_, ansi_level):
@@ -28,6 +30,14 @@ class Message(str):
     __slots__ = ("record",)
 
 
+class _UncatchableQueueFull(LoguruQueueFull):
+    """A queue-full rejection that must propagate even when ``catch=True``.
+
+    It is only used internally for the ``onqueue_full="raise"`` policy so that
+    the rejection signal is never silently converted into a stderr diagnostic.
+    """
+
+
 class Handler:
     def __init__(
         self,
@@ -41,6 +51,8 @@ class Handler:
         colorize,
         serialize,
         enqueue,
+        queue_maxsize,
+        onqueue_full,
         multiprocessing_context,
         error_interceptor,
         exception_formatter,
@@ -56,6 +68,8 @@ class Handler:
         self._colorize = colorize
         self._serialize = serialize
         self._enqueue = enqueue
+        self._queue_maxsize = queue_maxsize
+        self._onqueue_full = onqueue_full
         self._multiprocessing_context = multiprocessing_context
         self._error_interceptor = error_interceptor
         self._exception_formatter = exception_formatter
@@ -90,11 +104,24 @@ class Handler:
 
         if self._enqueue:
             if self._multiprocessing_context is None:
-                self._queue = multiprocessing.SimpleQueue()
+                if self._queue_maxsize is None:
+                    self._queue = UnboundedQueue(multiprocessing_context=None)
+                else:
+                    self._queue = BoundedQueue(
+                        self._queue_maxsize, multiprocessing_context=None
+                    )
                 self._confirmation_event = multiprocessing.Event()
                 self._confirmation_lock = multiprocessing.Lock()
             else:
-                self._queue = self._multiprocessing_context.SimpleQueue()
+                if self._queue_maxsize is None:
+                    self._queue = UnboundedQueue(
+                        multiprocessing_context=self._multiprocessing_context
+                    )
+                else:
+                    self._queue = BoundedQueue(
+                        self._queue_maxsize,
+                        multiprocessing_context=self._multiprocessing_context,
+                    )
                 self._confirmation_event = self._multiprocessing_context.Event()
                 self._confirmation_lock = self._multiprocessing_context.Lock()
             self._queue_lock = create_handler_lock()
@@ -199,15 +226,49 @@ class Handler:
 
             with self._protected_lock():
                 if self._stopped:
+                    if self._enqueue and self._queue_maxsize is not None:
+                        self._reject_stopped_record(str_record)
                     return
                 if self._enqueue:
-                    self._queue.put(str_record)
+                    self._enqueue_record(str_record)
                 else:
                     self._sink.write(str_record)
+        except _UncatchableQueueFull:
+            raise
         except Exception:
             if not self._error_interceptor.should_catch():
                 raise
             self._error_interceptor.print(record)
+
+    def _enqueue_record(self, str_record):
+        if self._onqueue_full == "block":
+            # Backpressure: the logging call waits until a slot is available.
+            self._queue.put(str_record, block=True)
+            return
+
+        try:
+            self._queue.put(str_record, block=False)
+        except LoguruQueueFull as exception:
+            if self._onqueue_full == "raise":
+                # An explicit hard signal: it always reaches the caller so that
+                # rejection can be handled programmatically, even with catch=True.
+                raise _UncatchableQueueFull(str(exception)) from None
+            if self._onqueue_full == "drop":
+                # Soft signal: it goes through the usual "catch" handling, so by
+                # default the rejection is reported on sys.stderr.
+                raise
+            # A user-provided callback acts as a dead-letter sink. If it returns
+            # normally, the record is considered handled and no error is raised.
+            self._onqueue_full(str_record)
+
+    def _reject_stopped_record(self, str_record):
+        message = "Log record has been rejected because the handler has been stopped"
+        if self._onqueue_full == "raise":
+            raise _UncatchableQueueFull(message)
+        if callable(self._onqueue_full):
+            self._onqueue_full(str_record)
+            return
+        raise LoguruQueueFull(message)
 
     def stop(self):
         with self._protected_lock():
@@ -216,7 +277,17 @@ class Handler:
                 if self._owner_process_pid != os.getpid():
                     return
                 self._queue.put(None)
-                self._thread.join()
+                self._thread.join(timeout=_defaults.LOGURU_STOP_TIMEOUT)
+                if self._thread.is_alive():
+                    # The writer thread could not finish in time, typically because another
+                    # thread is stuck on a "block" policy while the queue is full. We cannot
+                    # join it without hanging the process, so report the situation explicitly
+                    # instead of pretending the handler shut down cleanly.
+                    raise RuntimeError(
+                        "The enqueue writer thread did not stop within %d seconds. This can "
+                        "happen if a logging call is blocked on a full queue while the handler "
+                        "is being removed." % _defaults.LOGURU_STOP_TIMEOUT
+                    )
                 if hasattr(self._queue, "close"):
                     self._queue.close()
 

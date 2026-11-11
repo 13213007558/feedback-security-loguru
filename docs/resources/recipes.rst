@@ -1078,6 +1078,94 @@ Another thing to keep in mind when dealing with multiprocessing is the fact that
             results = pool.map(worker.work, [1, 10, 100])
 
 
+.. _recipes-bounded-queue:
+
+Bound the enqueue queue and handle rejections
+----------------------------------------------
+
+By default a handler added with ``enqueue=True`` uses an unbounded queue. This is convenient, but
+under heavy load or when a sink becomes slow the in-memory queue can grow without limit, eventually
+exhausting memory while callers keep assuming their logs were reliably saved.
+
+The ``queue_maxsize`` argument puts a hard cap on the number of records that may be waiting in the
+queue. The cap is backed by a multiprocessing semaphore shared with every process using the handler,
+so it is enforced globally rather than per process. When the cap is reached, new records are not
+silently swallowed: the ``onqueue_full`` argument decides what happens.
+
+- ``"drop"`` (the default): the record is discarded and the rejection is reported through the usual
+  ``catch`` mechanism (printed on |sys.stderr| when ``catch=True``, raised when ``catch=False``).
+- ``"raise"``: :class:`~loguru.LoguruQueueFull` is raised directly to the caller. This hard signal is
+  never converted into a stderr diagnostic, so it reaches your code even with ``catch=True``.
+- ``"block"``: the logging call waits until a slot becomes available. This applies backpressure and
+  never rejects, at the cost of potentially blocking the emitting thread or process.
+- A callable: it is invoked with the rejected formatted message (a ``Message``) and acts as a
+  dead-letter sink, for example to count drops or send them elsewhere. If it returns normally no
+  error is raised; if it raises, the exception follows the ``catch`` setting.
+
+.. code::
+
+    import sys
+    from loguru import logger, LoguruQueueFull
+
+    # At most 1000 records in flight across all processes.
+    logger.add("audit.log", enqueue=True, queue_maxsize=1000, onqueue_full="raise")
+
+    for i in range(1_000_000):
+        try:
+            logger.info("audit event {}", i)
+        except LoguruQueueFull:
+            # The record was definitively not accepted; handle it explicitly.
+            ...
+
+    # A dead-letter callback instead of raising.
+    dropped = []
+    logger.add(sys.stderr, enqueue=True, queue_maxsize=100, onqueue_full=dropped.append)
+
+When a slot is released
+^^^^^^^^^^^^^^^^^^^^^^^
+
+A slot is reserved *before* a record is serialized and pushed, and it is released by the writer
+thread as soon as the record is taken out of the queue, **before** the sink is called. Consequently:
+
+- a record that fails to be pickled never holds a slot, because insertion rolls the reservation back;
+- a record that cannot be unpickled on arrival still releases its slot;
+- a record whose sink raises releases its slot before the error is reported.
+
+A single bad record therefore can neither fill the queue nor block a completion barrier. Internal
+control markers (the stop sentinel and the |complete| barrier) do not consume capacity.
+
+What ``complete()`` waits for
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+|complete| sends a barrier marker behind the records already admitted and blocks until the writer
+thread has processed that marker. It therefore guarantees that **every record admitted before the
+call** has been handed to the sink's ``write()`` method. Records that were rejected (dropped, raised
+or sent to a dead-letter callback) were never admitted and are not waited for. A barrier does not
+wait for records logged by another thread after the call, and it does not imply the sink flushed or
+fsync'd the data.
+
+Guarantees and their limits
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The three stages below provide different guarantees, and they should not be confused:
+
+1. **Enqueue / admission.** With a bounded queue a successful logging call means the record was
+   admitted into the shared queue; a rejection is always observable (exception or callback). Without
+   ``queue_maxsize`` admission never fails but provides no bound on memory usage.
+2. **Completed write.** After |complete| returns, each admitted record has been processed by the
+   sink's ``write()`` without an uncaught error. This is a hand-off guarantee, not a durability one.
+3. **Durability / persistence.** Loguru does not call ``flush()`` or ``os.fsync()`` itself beyond
+   what the underlying sink does. Data still sitting in an OS or disk buffer can be lost on a power
+   failure or crash. Configure the sink (for example a line-buffered or unbuffered file, or a custom
+   sink) if you need stronger persistence.
+
+If a process is killed with ``SIGKILL`` (or otherwise crashes hard), none of the above can be
+enforced for records still held only in its memory: an in-flight logging call may never reach the
+queue, and records admitted but not yet written are lost. The bounded queue prevents unbounded
+memory growth and makes rejections explicit, but it cannot turn an asynchronous, cross-process
+queue into a transactional, durable log.
+
+
 .. _recipes-testing:
 
 Unit testing logs emitted by Loguru
