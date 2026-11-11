@@ -6,7 +6,7 @@ import os
 import shutil
 import string
 from functools import partial
-from stat import ST_DEV, ST_INO
+from stat import S_ISREG, ST_DEV, ST_INO, ST_MODE
 
 from . import _string_parsers as string_parsers
 from ._ctime_functions import get_ctime, set_ctime
@@ -20,7 +20,7 @@ def generate_rename_path(root, ext, creation_time):
     renamed_path = "{}.{}{}".format(root, date, ext)
     counter = 1
 
-    while os.path.exists(renamed_path):
+    while os.path.lexists(renamed_path):
         counter += 1
         renamed_path = "{}.{}.{}{}".format(root, date, counter, ext)
 
@@ -90,8 +90,14 @@ class Compression:
     def compression(path_in, ext, compress_function):
         path_out = "{}{}".format(path_in, ext)
 
-        if os.path.exists(path_out):
-            creation_time = get_ctime(path_out)
+        # The output path must never be followed if it is a symbolic link: it could
+        # point to a file outside of the log directory which would then be truncated
+        # or overwritten. A link is renamed aside like any pre-existing file.
+        if os.path.lexists(path_out):
+            if os.path.islink(path_out):
+                creation_time = os.lstat(path_out).st_ctime
+            else:
+                creation_time = get_ctime(path_out)
             root, ext_before = os.path.splitext(path_in)
             renamed_path = generate_rename_path(root, ext_before + ext, creation_time)
             rename_file(path_out, renamed_path)
@@ -224,6 +230,7 @@ class FileSink:
 
         self._file = None
         self._file_path = None
+        self._file_path_is_link = None
 
         self._watch = watch
         self._file_dev = -1
@@ -266,8 +273,17 @@ class FileSink:
         os.makedirs(dirname, exist_ok=True)
 
     def _create_file(self, path):
+        if self._file_path_is_link is False and os.path.islink(path):
+            raise OSError(
+                "The log file path %r was replaced by a symbolic link, refusing to follow "
+                "it.\nThe file previously opened at this path was not a symbolic link, so the "
+                "current one is most likely the result of an unexpected external modification "
+                "and following it could alter a file outside of the log directory." % path
+            )
+
         self._file = open(path, **self._kwargs)
         self._file_path = path
+        self._file_path_is_link = os.path.islink(path)
 
         if self._watch:
             fileno = self._file.fileno()
@@ -298,14 +314,29 @@ class FileSink:
             result = None
 
         if not result or result[ST_DEV] != self._file_dev or result[ST_INO] != self._file_ino:
+            if os.path.islink(filepath) and not self._file_path_is_link:
+                # The path was unexpectedly replaced by a symbolic link, it must not be
+                # followed as it could point to a file outside of the log directory. The
+                # file currently opened is still ours, so we keep writing to it.
+                return
             self._close_file()
             self._create_dirs(filepath)
             self._create_file(filepath)
 
     def _terminate_file(self, *, is_rotating=False):
         old_path = self._file_path
+        old_file_dev = -1
+        old_file_ino = -1
 
         if self._file is not None:
+            # Identify the file this sink was actually writing to, so that the
+            # post-processing below only ever applies to that very file. The path
+            # may have been replaced (possibly by a symbolic link) by an external
+            # rotation tool while the file was closed, and must not be followed in
+            # that case.
+            result = os.fstat(self._file.fileno())
+            old_file_dev = result[ST_DEV]
+            old_file_ino = result[ST_INO]
             self._close_file()
 
         if is_rotating:
@@ -313,14 +344,23 @@ class FileSink:
             self._create_dirs(new_path)
 
             if new_path == old_path:
-                creation_time = get_ctime(old_path)
-                root, ext = os.path.splitext(old_path)
-                renamed_path = generate_rename_path(root, ext, creation_time)
-                rename_file(old_path, renamed_path)
-                old_path = renamed_path
+                if self._is_owned_file(old_path, old_file_dev, old_file_ino):
+                    creation_time = get_ctime(old_path)
+                    root, ext = os.path.splitext(old_path)
+                    renamed_path = generate_rename_path(root, ext, creation_time)
+                    rename_file(old_path, renamed_path)
+                    old_path = renamed_path
+                else:
+                    # The file was moved or replaced while closed, it no longer
+                    # belongs to this sink and must be left alone.
+                    old_path = None
 
         if is_rotating or self._rotation_function is None:
-            if self._compression_function is not None and old_path is not None:
+            if (
+                self._compression_function is not None
+                and old_path is not None
+                and self._is_owned_file(old_path, old_file_dev, old_file_ino)
+            ):
                 self._compression_function(old_path)
 
             if self._retention_function is not None:
@@ -328,13 +368,25 @@ class FileSink:
                     file
                     for pattern in self._glob_patterns
                     for file in glob.glob(pattern)
-                    if os.path.isfile(file)
+                    if os.path.isfile(file) and not os.path.islink(file)
                 }
                 self._retention_function(list(logs))
 
         if is_rotating:
             self._create_file(new_path)
             set_ctime(new_path, datetime.datetime.now().timestamp())
+
+    @staticmethod
+    def _is_owned_file(path, dev, ino):
+        # Check that "path" still refers to the regular file identified by "dev" and
+        # "ino", without following a possible symbolic link put at its place.
+        try:
+            result = os.lstat(path)
+        except OSError:
+            return False
+        if not S_ISREG(result[ST_MODE]):
+            return False
+        return result[ST_DEV] == dev and result[ST_INO] == ino
 
     @staticmethod
     def _make_glob_patterns(path):

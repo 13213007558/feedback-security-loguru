@@ -1,6 +1,7 @@
 `Unreleased`_
 =============
 
+- Fix file sink post-processing (renaming, compression, retention) possibly applying to a different file than the one Loguru was writing to when an external tool replaced the log path while the file was closed; the replaced path is no longer followed, in particular when it was swapped for a symbolic link pointing outside of the log directory.
 - Change the default log format to include the timezone offset since it produces less ambiguous logs (`#856 <https://github.com/Delgan/loguru/pull/856>`_, thanks `@tim-x-y-z <https://github.com/tim-x-y-z>`_).
 - Add new ``logger.reinstall()`` method to automatically set up the ``logger`` in spawned child processes (`#818 <https://github.com/Delgan/loguru/issues/818>`_, thanks `@monchin <https://github.com/monchin>`_).
 - Add support for template strings used as log messages (`#1397 <https://github.com/Delgan/loguru/issues/1397>`_, thanks `@TurtleOrangina <https://github.com/TurtleOrangina>`_).
