@@ -42,6 +42,14 @@
 .. |multiprocessing| replace:: :mod:`multiprocessing`
 .. |Thread.run| replace:: :meth:`Thread.run()<threading.Thread.run()>`
 .. |Exception| replace:: :class:`Exception`
+.. |TypeError| replace:: :class:`TypeError`
+.. |BaseException| replace:: :class:`BaseException`
+.. |ExceptionGroup| replace:: :class:`ExceptionGroup`
+.. |BaseExceptionGroup| replace:: :class:`BaseExceptionGroup`
+.. |KeyboardInterrupt| replace:: :class:`KeyboardInterrupt`
+.. |SystemExit| replace:: :class:`SystemExit`
+.. |GeneratorExit| replace:: :class:`GeneratorExit`
+.. |asyncio.CancelledError| replace:: :class:`asyncio.CancelledError`
 .. |AbstractEventLoop| replace:: :class:`AbstractEventLoop<asyncio.AbstractEventLoop>`
 .. |asyncio.get_running_loop| replace:: :func:`asyncio.get_running_loop()`
 .. |asyncio.run| replace:: :func:`asyncio.run()`
@@ -1213,6 +1221,40 @@ class Logger:
 
         The returned object can also be used as a context manager.
 
+        The decorated object may be a regular function, a |coroutine function|, a generator
+        function or an asynchronous generator function. Note that for (asynchronous)
+        generators, exceptions are caught while the generator is being iterated over, not
+        when it is merely called.
+
+        Exceptions which do not inherit from |Exception| (such as |KeyboardInterrupt|,
+        |SystemExit|, |asyncio.CancelledError| and |GeneratorExit|) are never caught unless
+        ``exception`` is explicitly set to a type they derive from (e.g. |BaseException|):
+        cancellation and exit requests always propagate to the caller, unlogged.
+
+        If an |ExceptionGroup| (or |BaseExceptionGroup|) is raised, it is matched as a
+        whole: ``exception`` and ``exclude`` are compared against the type of the group
+        itself, never against the types of the exceptions it contains. Consequently, an
+        |ExceptionGroup| is caught by default (it inherits from |Exception|) while a
+        |BaseExceptionGroup| containing |BaseException| leaves is not, and excluding a
+        leaf type does not exclude a group containing such leaves.
+
+        If the ``onerror`` callback raises an exception, or if logging the caught
+        exception itself fails (for example because of a misbehaving sink), that new
+        exception is propagated to the caller instead of being swallowed.
+
+        Decorating a class is not supported and raises |TypeError|. Applying the
+        decorator above ``@staticmethod`` or ``@classmethod`` (hence wrapping the
+        descriptor object instead of the underlying function) is not supported either:
+        the descriptor is misinterpreted and calling the method later fails with a
+        |TypeError|, so ``catch()`` should be applied below them. Similarly, decorating
+        a regular function which merely returns a coroutine does not protect the
+        coroutine: exceptions raised while it is awaited propagate uncaught and
+        unlogged. Finally, decorating an asynchronous generator function preserves the
+        asynchronous generator protocol (``asend()``, ``athrow()``, ``aclose()``) but
+        not introspection: ``inspect.isasyncgenfunction()`` returns ``False`` for the
+        wrapped function, and the ``default`` value has no effect since a stopped
+        asynchronous generator cannot carry a return value.
+
         Parameters
         ----------
         exception : |Exception|, optional
@@ -1230,7 +1272,8 @@ class Logger:
             propagated to the caller without being logged.
         default : |Any|, optional
             The value to be returned by the decorated function if an error occurred without being
-            re-raised.
+            re-raised. It is ignored when ``reraise`` is set to ``True`` and when the
+            catcher is used as a context manager.
         message : |str|, optional
             The message that will be automatically logged if an exception occurs. Note that it will
             be formatted with the ``record`` attribute.
